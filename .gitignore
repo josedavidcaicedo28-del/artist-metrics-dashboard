@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Environment variables (NUNCA subir al repo)
+.env
+.env.local
+.env.production
+
+# Data local (JSON de artistas — contiene tokens)
+data/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Vercel
+.vercel/
