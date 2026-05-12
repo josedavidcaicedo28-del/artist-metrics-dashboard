@@ -1,76 +1,106 @@
 const express = require('express');
-const router = express.Router();
-const axios = require('axios');
+const router  = express.Router();
+const axios   = require('axios');
 const { getArtist, saveArtist } = require('../lib/storage');
 
-const IG_AUTH = 'https://api.instagram.com/oauth/authorize';
-const IG_TOKEN = 'https://api.instagram.com/oauth/access_token';
+const IG_AUTH       = 'https://api.instagram.com/oauth/authorize';
+const IG_TOKEN      = 'https://api.instagram.com/oauth/access_token';
 const IG_LONG_TOKEN = 'https://graph.instagram.com/access_token';
-const IG_GRAPH = 'https://graph.instagram.com';
+const IG_GRAPH      = 'https://graph.instagram.com';
+const PROD_URL      = 'https://artist-metrics-dashboard.vercel.app';
+
+function getRedirectUri() {
+  return process.env.INSTAGRAM_REDIRECT_URI ||
+         `${process.env.BASE_URL || PROD_URL}/api/instagram/callback`;
+}
 
 function appCreds(artist) {
-  const c = artist.credentials.instagram;
+  const c = artist.credentials.instagram || {};
   return {
-    appId: c.appId || process.env.INSTAGRAM_APP_ID,
-    appSecret: c.appSecret || process.env.INSTAGRAM_APP_SECRET,
-    redirectUri: process.env.INSTAGRAM_REDIRECT_URI ||
-      `${process.env.BASE_URL || 'http://localhost:3000'}/api/instagram/callback`
+    appId:     c.appId     || process.env.INSTAGRAM_APP_ID,
+    appSecret: c.appSecret || process.env.INSTAGRAM_APP_SECRET
   };
 }
 
-// GET /api/instagram/auth/:artistId — generate OAuth URL
-router.get('/auth/:artistId', (req, res) => {
-  const artist = getArtist(req.params.artistId);
-  if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
+// GET /api/instagram/auth/:artistId
+router.get('/auth/:artistId', async (req, res) => {
+  try {
+    const artist = await getArtist(req.params.artistId);
+    if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
 
-  const { appId, redirectUri } = appCreds(artist);
-  if (!appId) return res.status(400).json({ error: 'INSTAGRAM_APP_ID no configurado' });
+    const { appId } = appCreds(artist);
+    if (!appId) return res.status(400).json({ error: 'INSTAGRAM_APP_ID no configurado' });
 
-  const params = new URLSearchParams({
-    client_id: appId,
-    redirect_uri: redirectUri,
-    scope: 'user_profile,user_media',
-    response_type: 'code',
-    state: req.params.artistId
-  });
+    const statePayload = Buffer.from(
+      JSON.stringify({ id: artist.id, name: artist.name })
+    ).toString('base64url');
 
-  res.json({ url: `${IG_AUTH}?${params}` });
+    const params = new URLSearchParams({
+      client_id:     appId,
+      redirect_uri:  getRedirectUri(),
+      scope:         'user_profile,user_media',
+      response_type: 'code',
+      state:         statePayload
+    });
+
+    res.json({ url: `${IG_AUTH}?${params}` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// GET /api/instagram/callback — OAuth callback
+// GET /api/instagram/callback
 router.get('/callback', async (req, res) => {
-  const { code, state: artistId, error } = req.query;
+  const { code, state: stateParam, error } = req.query;
+
+  let artistId, artistName;
+  try {
+    const decoded = JSON.parse(Buffer.from(stateParam, 'base64url').toString('utf8'));
+    artistId   = decoded.id;
+    artistName = decoded.name;
+  } catch {
+    artistId = stateParam;
+  }
+
   if (error) return res.redirect(`/?error=instagram_denied&artistId=${artistId}`);
 
-  const artist = getArtist(artistId);
-  if (!artist) return res.redirect('/?error=artist_not_found');
+  let artist = await getArtist(artistId);
+  if (!artist) {
+    if (!artistId) return res.redirect('/?error=artist_not_found');
+    artist = {
+      id: artistId, name: artistName || 'Artista', image: null,
+      createdAt: new Date().toISOString(),
+      credentials: {
+        spotify: { connected: false }, youtube: { connected: false },
+        instagram: { connected: false }, tiktok: { connected: false }
+      },
+      weeklyData: { prevWeek: {}, currWeek: {} }
+    };
+  }
 
-  const { appId, appSecret, redirectUri } = appCreds(artist);
+  const { appId, appSecret } = appCreds(artist);
 
   try {
-    // Short-lived token
     const shortRes = await axios.post(IG_TOKEN,
       new URLSearchParams({ client_id: appId, client_secret: appSecret,
-        grant_type: 'authorization_code', redirect_uri: redirectUri, code }),
+        grant_type: 'authorization_code', redirect_uri: getRedirectUri(), code }),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
 
-    const { access_token: shortToken, user_id } = shortRes.data;
-
-    // Long-lived token (~60 days)
     const longRes = await axios.get(IG_LONG_TOKEN, {
-      params: { grant_type: 'ig_exchange_token', client_secret: appSecret, access_token: shortToken }
+      params: { grant_type: 'ig_exchange_token', client_secret: appSecret,
+                access_token: shortRes.data.access_token }
     });
 
     artist.credentials.instagram = {
       ...artist.credentials.instagram,
       accessToken: longRes.data.access_token,
-      userId: String(user_id),
-      expiresAt: Date.now() + longRes.data.expires_in * 1000,
-      connected: true
+      userId:      String(shortRes.data.user_id),
+      expiresAt:   Date.now() + longRes.data.expires_in * 1000,
+      connected:   true
     };
 
-    saveArtist(artist);
+    await saveArtist(artist);
     res.redirect(`/?success=instagram_connected&artistId=${artistId}`);
   } catch (err) {
     console.error('Instagram callback error:', err.response?.data || err.message);
@@ -78,39 +108,41 @@ router.get('/callback', async (req, res) => {
   }
 });
 
-// POST /api/instagram/config/:artistId — save manual access token
-router.post('/config/:artistId', (req, res) => {
-  const artist = getArtist(req.params.artistId);
-  if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
+// POST /api/instagram/config/:artistId
+router.post('/config/:artistId', async (req, res) => {
+  try {
+    const artist = await getArtist(req.params.artistId);
+    if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
 
-  const { accessToken, userId, appId, appSecret } = req.body;
-  const c = artist.credentials.instagram || {};
+    const { accessToken, userId, appId, appSecret } = req.body;
+    const c = artist.credentials.instagram || {};
 
-  artist.credentials.instagram = {
-    ...c,
-    appId: appId || c.appId,
-    appSecret: appSecret || c.appSecret,
-    accessToken: accessToken || c.accessToken,
-    userId: userId || c.userId,
-    connected: !!(accessToken || c.accessToken)
-  };
+    artist.credentials.instagram = {
+      ...c,
+      appId:       appId       || c.appId,
+      appSecret:   appSecret   || c.appSecret,
+      accessToken: accessToken || c.accessToken,
+      userId:      userId      || c.userId,
+      connected:   !!(accessToken || c.accessToken)
+    };
 
-  saveArtist(artist);
-  res.json({ ok: true });
+    await saveArtist(artist);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// GET /api/instagram/metrics/:artistId — fetch metrics
+// GET /api/instagram/metrics/:artistId
 router.get('/metrics/:artistId', async (req, res) => {
-  const artist = getArtist(req.params.artistId);
-  if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
-
-  const c = artist.credentials.instagram;
-  if (!c?.connected || !c.accessToken) {
-    return res.status(400).json({ error: 'Instagram no conectado' });
-  }
-
   try {
-    // Profile fields
+    const artist = await getArtist(req.params.artistId);
+    if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
+
+    const c = artist.credentials.instagram;
+    if (!c?.connected || !c.accessToken)
+      return res.status(400).json({ error: 'Instagram no conectado' });
+
     const profileRes = await axios.get(`${IG_GRAPH}/me`, {
       params: {
         fields: 'id,username,account_type,media_count,followers_count,profile_picture_url',
@@ -118,73 +150,63 @@ router.get('/metrics/:artistId', async (req, res) => {
       }
     });
 
-    const profile = profileRes.data;
-
-    // Recent media (last 100 posts)
     const mediaRes = await axios.get(`${IG_GRAPH}/me/media`, {
-      params: {
-        fields: 'id,media_type,timestamp,like_count,comments_count,insights.metric(reach,impressions)',
-        limit: 100,
-        access_token: c.accessToken
-      }
+      params: { fields: 'id,media_type,timestamp', limit: 100, access_token: c.accessToken }
     }).catch(() => ({ data: { data: [] } }));
 
-    const media = mediaRes.data.data || [];
-    const now = new Date();
-    const oneWeekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
-    const twoWeeksAgo = new Date(now - 14 * 24 * 60 * 60 * 1000);
+    const media       = mediaRes.data.data || [];
+    const now         = new Date();
+    const oneWeekAgo  = new Date(now - 7  * 86_400_000);
+    const twoWeeksAgo = new Date(now - 14 * 86_400_000);
 
-    function countType(items, type) {
-      return items.filter(m => m.media_type === type).length;
-    }
-
+    const countType = (items, type) => items.filter(m => m.media_type === type).length;
     const currMedia = media.filter(m => new Date(m.timestamp) >= oneWeekAgo);
     const prevMedia = media.filter(m => {
       const d = new Date(m.timestamp);
       return d >= twoWeeksAgo && d < oneWeekAgo;
     });
 
-    const metrics = {
-      username: profile.username,
-      totalFollowers: profile.followers_count || 0,
-      totalMedia: profile.media_count || 0,
-      profilePicture: profile.profile_picture_url || null,
+    res.json({
+      username:       profileRes.data.username,
+      totalFollowers: profileRes.data.followers_count || 0,
+      totalMedia:     profileRes.data.media_count || 0,
+      profilePicture: profileRes.data.profile_picture_url || null,
       currWeek: {
-        reels: countType(currMedia, 'VIDEO'),
+        reels:     countType(currMedia, 'VIDEO'),
         carousels: countType(currMedia, 'CAROUSEL_ALBUM'),
-        images: countType(currMedia, 'IMAGE'),
-        total: currMedia.length
+        images:    countType(currMedia, 'IMAGE'),
+        total:     currMedia.length
       },
       prevWeek: {
-        reels: countType(prevMedia, 'VIDEO'),
+        reels:     countType(prevMedia, 'VIDEO'),
         carousels: countType(prevMedia, 'CAROUSEL_ALBUM'),
-        images: countType(prevMedia, 'IMAGE'),
-        total: prevMedia.length
+        images:    countType(prevMedia, 'IMAGE'),
+        total:     prevMedia.length
       },
       fetchedAt: new Date().toISOString()
-    };
-
-    res.json(metrics);
+    });
   } catch (err) {
-    console.error('Instagram metrics error:', err.response?.data || err.message);
-    const msg = err.response?.data?.error?.message || err.message;
-    res.status(500).json({ error: msg });
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message });
   }
 });
 
 // DELETE /api/instagram/disconnect/:artistId
-router.delete('/disconnect/:artistId', (req, res) => {
-  const artist = getArtist(req.params.artistId);
-  if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
+router.delete('/disconnect/:artistId', async (req, res) => {
+  try {
+    const artist = await getArtist(req.params.artistId);
+    if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
 
-  artist.credentials.instagram = {
-    appId: artist.credentials.instagram?.appId,
-    appSecret: artist.credentials.instagram?.appSecret,
-    connected: false
-  };
+    artist.credentials.instagram = {
+      appId:     artist.credentials.instagram?.appId,
+      appSecret: artist.credentials.instagram?.appSecret,
+      connected: false
+    };
 
-  saveArtist(artist);
-  res.json({ ok: true });
+    await saveArtist(artist);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = router;

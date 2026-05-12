@@ -1,6 +1,6 @@
 const express = require('express');
-const router = express.Router();
-const axios = require('axios');
+const router  = express.Router();
+const axios   = require('axios');
 const { getArtist, saveArtist } = require('../lib/storage');
 
 const AUTH_URL  = 'https://accounts.spotify.com/authorize';
@@ -8,21 +8,16 @@ const TOKEN_URL = 'https://accounts.spotify.com/api/token';
 const API_URL   = 'https://api.spotify.com/v1';
 
 const SCOPES = [
-  'user-read-private',
-  'user-read-email',
-  'user-follow-read',
-  'user-top-read',
+  'user-read-private', 'user-read-email',
+  'user-follow-read',  'user-top-read',
   'user-read-recently-played'
 ].join(' ');
 
-// Production URL used as fallback so Vercel doesn't fall back to localhost
 const PROD_URL = 'https://artist-metrics-dashboard.vercel.app';
 
 function getRedirectUri() {
-  return (
-    process.env.SPOTIFY_REDIRECT_URI ||
-    `${process.env.BASE_URL || PROD_URL}/api/spotify/callback`
-  );
+  return process.env.SPOTIFY_REDIRECT_URI ||
+         `${process.env.BASE_URL || PROD_URL}/api/spotify/callback`;
 }
 
 function getAppCreds(artist) {
@@ -33,11 +28,11 @@ function getAppCreds(artist) {
   };
 }
 
-// ─── Client Credentials (no user auth needed, for public artist data) ──────
+// ── Client Credentials (no user auth — for public artist data) ───────────────
 async function getClientCredentialsToken(clientId, clientSecret) {
-  if (!clientId || !clientSecret) {
+  if (!clientId || !clientSecret)
     throw new Error('SPOTIFY_CLIENT_ID y SPOTIFY_CLIENT_SECRET son requeridos');
-  }
+
   const { data } = await axios.post(
     TOKEN_URL,
     new URLSearchParams({ grant_type: 'client_credentials' }),
@@ -51,11 +46,10 @@ async function getClientCredentialsToken(clientId, clientSecret) {
   return data.access_token;
 }
 
-// ─── OAuth token refresh ─────────────────────────────────────────────────────
+// ── OAuth token refresh ───────────────────────────────────────────────────────
 async function getRefreshedToken(artist) {
   const c = artist.credentials.spotify;
   if (!c?.accessToken) throw new Error('Spotify OAuth no conectado');
-
   if (Date.now() < c.expiresAt - 60_000) return c.accessToken;
 
   const { clientId, clientSecret } = getAppCreds(artist);
@@ -73,68 +67,64 @@ async function getRefreshedToken(artist) {
   c.accessToken = data.access_token;
   c.expiresAt   = Date.now() + data.expires_in * 1000;
   if (data.refresh_token) c.refreshToken = data.refresh_token;
-  saveArtist(artist);
+  await saveArtist(artist);
   return c.accessToken;
 }
 
-// ─── GET /api/spotify/auth/:artistId — generate OAuth URL ───────────────────
-router.get('/auth/:artistId', (req, res) => {
-  const artist = getArtist(req.params.artistId);
-  if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
+// ── GET /api/spotify/auth/:artistId ──────────────────────────────────────────
+router.get('/auth/:artistId', async (req, res) => {
+  try {
+    const artist = await getArtist(req.params.artistId);
+    if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
 
-  const { clientId } = getAppCreds(artist);
-  if (!clientId) return res.status(400).json({ error: 'SPOTIFY_CLIENT_ID no configurado' });
+    const { clientId } = getAppCreds(artist);
+    if (!clientId) return res.status(400).json({ error: 'SPOTIFY_CLIENT_ID no configurado' });
 
-  // Encode artistId + artist name in state so the callback can recover
-  // even if /tmp is empty in the Vercel invocation that receives the redirect
-  const statePayload = Buffer.from(
-    JSON.stringify({ id: artist.id, name: artist.name })
-  ).toString('base64url');
+    // Encode id + name in state so callback can recover even on cold Vercel instance
+    const statePayload = Buffer.from(
+      JSON.stringify({ id: artist.id, name: artist.name })
+    ).toString('base64url');
 
-  const params = new URLSearchParams({
-    client_id:     clientId,
-    response_type: 'code',
-    redirect_uri:  getRedirectUri(),
-    scope:         SCOPES,
-    state:         statePayload,
-    show_dialog:   'true'
-  });
+    const params = new URLSearchParams({
+      client_id:     clientId,
+      response_type: 'code',
+      redirect_uri:  getRedirectUri(),
+      scope:         SCOPES,
+      state:         statePayload,
+      show_dialog:   'true'
+    });
 
-  res.json({ url: `${AUTH_URL}?${params}` });
+    res.json({ url: `${AUTH_URL}?${params}` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// ─── GET /api/spotify/callback — OAuth callback ──────────────────────────────
+// ── GET /api/spotify/callback ─────────────────────────────────────────────────
 router.get('/callback', async (req, res) => {
   const { code, state: stateParam, error } = req.query;
 
-  // Decode state (may be plain artistId for backwards compat, or base64url JSON)
   let artistId, artistName;
   try {
     const decoded = JSON.parse(Buffer.from(stateParam, 'base64url').toString('utf8'));
     artistId   = decoded.id;
     artistName = decoded.name;
   } catch {
-    // Fallback: state is the raw artistId (old format)
-    artistId = stateParam;
+    artistId = stateParam; // legacy plain-id fallback
   }
 
   if (error) return res.redirect(`/?error=spotify_denied&artistId=${artistId}`);
 
-  // Try to load from storage; if /tmp is empty (Vercel cold start), reconstruct minimal artist
-  let artist = getArtist(artistId);
+  // Try storage; if empty (Vercel cold start) reconstruct minimal shell
+  let artist = await getArtist(artistId);
   if (!artist) {
     if (!artistId) return res.redirect('/?error=artist_not_found');
-    // Reconstruct a minimal shell so the token can be stored
     artist = {
-      id: artistId,
-      name: artistName || 'Artista',
-      image: null,
+      id: artistId, name: artistName || 'Artista', image: null,
       createdAt: new Date().toISOString(),
       credentials: {
-        spotify:   { connected: false },
-        youtube:   { connected: false },
-        instagram: { connected: false },
-        tiktok:    { connected: false }
+        spotify: { connected: false }, youtube: { connected: false },
+        instagram: { connected: false }, tiktok: { connected: false }
       },
       weeklyData: { prevWeek: {}, currWeek: {} }
     };
@@ -145,11 +135,7 @@ router.get('/callback', async (req, res) => {
   try {
     const { data } = await axios.post(
       TOKEN_URL,
-      new URLSearchParams({
-        grant_type:   'authorization_code',
-        code,
-        redirect_uri: getRedirectUri()
-      }),
+      new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: getRedirectUri() }),
       {
         headers: {
           Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
@@ -164,15 +150,15 @@ router.get('/callback', async (req, res) => {
 
     artist.credentials.spotify = {
       ...artist.credentials.spotify,
-      accessToken:    data.access_token,
-      refreshToken:   data.refresh_token,
-      expiresAt:      Date.now() + data.expires_in * 1000,
-      spotifyUserId:  profileRes.data.id,
-      displayName:    profileRes.data.display_name,
-      connected:      true
+      accessToken:   data.access_token,
+      refreshToken:  data.refresh_token,
+      expiresAt:     Date.now() + data.expires_in * 1000,
+      spotifyUserId: profileRes.data.id,
+      displayName:   profileRes.data.display_name,
+      connected:     true
     };
 
-    saveArtist(artist);
+    await saveArtist(artist);
     res.redirect(`/?success=spotify_connected&artistId=${artistId}`);
   } catch (err) {
     console.error('Spotify callback error:', err.response?.data || err.message);
@@ -180,44 +166,37 @@ router.get('/callback', async (req, res) => {
   }
 });
 
-// ─── GET /api/spotify/metrics/:artistId — fetch artist metrics ───────────────
-// Uses Client Credentials when spotifyArtistId is configured (no OAuth needed).
-// Falls back to the user OAuth token for user-specific data if available.
+// ── GET /api/spotify/metrics/:artistId ───────────────────────────────────────
 router.get('/metrics/:artistId', async (req, res) => {
-  const artist = getArtist(req.params.artistId);
-  if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
-
-  const { clientId, clientSecret } = getAppCreds(artist);
-  const spotifyArtistId = artist.credentials.spotify?.spotifyArtistId;
-  const hasOAuth        = !!artist.credentials.spotify?.accessToken;
-
-  if (!clientId) return res.status(400).json({ error: 'SPOTIFY_CLIENT_ID no configurado' });
-  if (!spotifyArtistId && !hasOAuth) {
-    return res.status(400).json({
-      error: 'Configura el Spotify Artist ID o conecta con OAuth primero'
-    });
-  }
-
   try {
-    let artistData = null;
-    let topTracks  = [];
-    let recentPlayCount = 0;
+    const artist = await getArtist(req.params.artistId);
+    if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
 
-    // ── Path A: Client Credentials — public artist data (preferred, no OAuth needed) ──
+    const { clientId, clientSecret } = getAppCreds(artist);
+    const spotifyArtistId = artist.credentials.spotify?.spotifyArtistId;
+    const hasOAuth        = !!artist.credentials.spotify?.accessToken;
+
+    if (!clientId) return res.status(400).json({ error: 'SPOTIFY_CLIENT_ID no configurado' });
+    if (!spotifyArtistId && !hasOAuth)
+      return res.status(400).json({ error: 'Configura el Spotify Artist ID o conecta OAuth primero' });
+
+    let artistData = null, topTracks = [], recentPlayCount = 0;
+
+    // Path A: Client Credentials — public artist data (preferred)
     if (spotifyArtistId) {
       const ccToken = await getClientCredentialsToken(clientId, clientSecret);
       const headers = { Authorization: `Bearer ${ccToken}` };
 
-      const [artistRes, topTracksRes] = await Promise.allSettled([
+      const [artistRes, topRes] = await Promise.allSettled([
         axios.get(`${API_URL}/artists/${spotifyArtistId}`, { headers }),
         axios.get(`${API_URL}/artists/${spotifyArtistId}/top-tracks?market=ES`, { headers })
       ]);
 
       if (artistRes.status === 'fulfilled') artistData = artistRes.value.data;
-      if (topTracksRes.status === 'fulfilled') topTracks = topTracksRes.value.data.tracks || [];
+      if (topRes.status === 'fulfilled')    topTracks  = topRes.value.data.tracks || [];
     }
 
-    // ── Path B: OAuth user token — adds recently-played count ──────────────────
+    // Path B: OAuth — adds recently-played count
     if (hasOAuth) {
       try {
         const oauthToken = await getRefreshedToken(artist);
@@ -227,111 +206,104 @@ router.get('/metrics/:artistId', async (req, res) => {
         );
         recentPlayCount = recentRes.data.items?.length || 0;
 
-        // If no spotifyArtistId, fall back to user profile for follower count
         if (!artistData) {
-          const profileRes = await axios.get(`${API_URL}/me`, {
-            headers: { Authorization: `Bearer ${oauthToken}` }
-          });
+          const profileRes = await axios.get(`${API_URL}/me`,
+            { headers: { Authorization: `Bearer ${oauthToken}` } });
           artistData = {
-            name: profileRes.data.display_name,
+            name:      profileRes.data.display_name,
             followers: { total: profileRes.data.followers?.total || 0 },
-            images: profileRes.data.images || []
+            images:    profileRes.data.images || []
           };
         }
       } catch (oauthErr) {
-        // OAuth failed (expired + refresh failed) — not fatal if we have CC data
         console.warn('OAuth refresh failed, using Client Credentials only:', oauthErr.message);
       }
     }
 
-    const metrics = {
+    res.json({
       totalFollowers:  artistData?.followers?.total ?? 0,
       displayName:     artistData?.name ?? '',
       image:           artistData?.images?.[0]?.url ?? null,
       popularity:      artistData?.popularity ?? 0,
       topTracks: topTracks.slice(0, 5).map(t => ({
-        name:       t.name,
-        id:         t.id,
-        popularity: t.popularity,
-        previewUrl: t.preview_url || null
+        name: t.name, id: t.id, popularity: t.popularity, previewUrl: t.preview_url || null
       })),
       recentPlayCount,
-      fetchedAt: new Date().toISOString(),
+      fetchedAt:  new Date().toISOString(),
       authMethod: spotifyArtistId ? 'client_credentials' : 'oauth',
-      note: 'Oyentes semanales y streams exactos solo están disponibles en Spotify for Artists. Usa ✏️ Editar para ingresar esas métricas manualmente.'
-    };
-
-    res.json(metrics);
+      note: 'Oyentes semanales y streams exactos solo están en Spotify for Artists. Usa ✏️ Editar para ingresarlos.'
+    });
   } catch (err) {
     console.error('Spotify metrics error:', err.response?.data || err.message);
-    const msg = err.response?.data?.error?.message || err.message;
-    res.status(500).json({ error: msg });
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message });
   }
 });
 
-// ─── GET /api/spotify/artist-public/:spotifyArtistId — lookup by Spotify ID ──
-// No stored artist needed — uses Client Credentials directly.
-// Useful to verify an Artist ID before saving it.
+// ── GET /api/spotify/artist-public/:spotifyArtistId — no stored artist needed ─
 router.get('/artist-public/:spotifyArtistId', async (req, res) => {
-  const clientId     = process.env.SPOTIFY_CLIENT_ID;
-  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
-
   try {
-    const token = await getClientCredentialsToken(clientId, clientSecret);
+    const token = await getClientCredentialsToken(
+      process.env.SPOTIFY_CLIENT_ID,
+      process.env.SPOTIFY_CLIENT_SECRET
+    );
     const { data } = await axios.get(
       `${API_URL}/artists/${req.params.spotifyArtistId}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
     res.json({
-      id:        data.id,
-      name:      data.name,
-      followers: data.followers?.total,
+      id:         data.id,
+      name:       data.name,
+      followers:  data.followers?.total,
       popularity: data.popularity,
-      image:     data.images?.[0]?.url || null,
-      genres:    data.genres || []
+      image:      data.images?.[0]?.url || null,
+      genres:     data.genres || []
     });
   } catch (err) {
-    const msg = err.response?.data?.error?.message || err.message;
-    const status = err.response?.status || 500;
-    res.status(status).json({ error: msg });
+    res.status(err.response?.status || 500).json({
+      error: err.response?.data?.error?.message || err.message
+    });
   }
 });
 
-// ─── POST /api/spotify/config/:artistId — save Artist ID & optional app creds ─
-router.post('/config/:artistId', (req, res) => {
-  const artist = getArtist(req.params.artistId);
-  if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
+// ── POST /api/spotify/config/:artistId ───────────────────────────────────────
+router.post('/config/:artistId', async (req, res) => {
+  try {
+    const artist = await getArtist(req.params.artistId);
+    if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
 
-  const { spotifyArtistId, clientId, clientSecret } = req.body;
-  const c = artist.credentials.spotify;
+    const { spotifyArtistId, clientId, clientSecret } = req.body;
+    const c = artist.credentials.spotify;
 
-  if (spotifyArtistId !== undefined) c.spotifyArtistId = spotifyArtistId.trim();
-  if (clientId)     c.clientId     = clientId.trim();
-  if (clientSecret) c.clientSecret = clientSecret.trim();
+    if (spotifyArtistId !== undefined) c.spotifyArtistId = spotifyArtistId.trim();
+    if (clientId)     c.clientId     = clientId.trim();
+    if (clientSecret) c.clientSecret = clientSecret.trim();
+    if (spotifyArtistId || c.spotifyArtistId) c.connected = true;
 
-  // Mark as connected if we have an artistId (Client Credentials path)
-  if (spotifyArtistId || c.spotifyArtistId) {
-    c.connected = true;
+    await saveArtist(artist);
+    res.json({ ok: true, connected: c.connected });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-
-  saveArtist(artist);
-  res.json({ ok: true, connected: c.connected });
 });
 
-// ─── DELETE /api/spotify/disconnect/:artistId ────────────────────────────────
-router.delete('/disconnect/:artistId', (req, res) => {
-  const artist = getArtist(req.params.artistId);
-  if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
+// ── DELETE /api/spotify/disconnect/:artistId ──────────────────────────────────
+router.delete('/disconnect/:artistId', async (req, res) => {
+  try {
+    const artist = await getArtist(req.params.artistId);
+    if (!artist) return res.status(404).json({ error: 'Artista no encontrado' });
 
-  artist.credentials.spotify = {
-    clientId:         artist.credentials.spotify?.clientId,
-    clientSecret:     artist.credentials.spotify?.clientSecret,
-    spotifyArtistId:  artist.credentials.spotify?.spotifyArtistId,
-    connected:        false
-  };
+    artist.credentials.spotify = {
+      clientId:        artist.credentials.spotify?.clientId,
+      clientSecret:    artist.credentials.spotify?.clientSecret,
+      spotifyArtistId: artist.credentials.spotify?.spotifyArtistId,
+      connected:       false
+    };
 
-  saveArtist(artist);
-  res.json({ ok: true });
+    await saveArtist(artist);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = router;
