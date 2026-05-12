@@ -773,65 +773,123 @@ function showSpotifyConfigModal(id) {
       <button class="modal-close" onclick="closeModal()">×</button>
     </div>
     <div class="modal-body">
+
+      <!-- PRIMARY: Artist ID (no OAuth needed) -->
       <div class="alert alert-info">
-        Conecta la cuenta de Spotify del artista mediante OAuth para obtener datos automáticamente.
-        También puedes ingresar el Spotify Artist ID para obtener datos del perfil público del artista.
+        <strong>Solo necesitas el Spotify Artist ID</strong> para obtener datos del artista
+        (seguidores, popularidad, top tracks). No se requiere OAuth.
       </div>
 
-      <div class="form-section-title">App Personalizada (opcional)</div>
+      <div class="form-group" style="margin-top:16px;">
+        <label>Spotify Artist ID *</label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" id="sp-artist-id" value="${c.spotifyArtistId || ''}"
+            placeholder="Ej: 36pU0SBDFZq23Ca4qq40jg"
+            style="flex:1;" />
+          <button class="btn btn-secondary btn-sm" onclick="verifySpotifyArtist()" style="white-space:nowrap;">
+            🔍 Verificar
+          </button>
+        </div>
+        <span class="form-hint">
+          Encuéntralo en Spotify → perfil del artista → Compartir → Copiar enlace.
+          El ID es la parte después de <code>artist/</code> y antes de <code>?</code>.
+        </span>
+      </div>
+
+      <div id="sp-artist-preview" style="margin-top:12px;"></div>
+
+      <!-- SECONDARY: Custom app credentials (optional) -->
+      <div class="form-section-title" style="margin-top:20px;">Credenciales de App (opcional)</div>
       <p style="font-size:0.82rem; color:var(--text2); margin-bottom:14px;">
-        Si tienes un cliente_id/secret propio en Spotify Developer, ingrésalos aquí.
-        De lo contrario se usarán las credenciales globales.
+        Las variables <code>SPOTIFY_CLIENT_ID</code> y <code>SPOTIFY_CLIENT_SECRET</code>
+        se usan globalmente desde Vercel. Solo completa esto si este artista usa una app diferente.
       </p>
       <div class="form-row">
         <div class="form-group">
-          <label>Client ID</label>
-          <input type="text" id="sp-client-id" value="${c.clientId || ''}" placeholder="De Spotify Developer" />
+          <label>Client ID (override)</label>
+          <input type="text" id="sp-client-id" value="${c.clientId || ''}" placeholder="Dejar vacío para usar el global" />
         </div>
         <div class="form-group">
-          <label>Client Secret</label>
-          <input type="password" id="sp-client-secret" placeholder="Dejar en blanco para mantener" />
+          <label>Client Secret (override)</label>
+          <input type="password" id="sp-client-secret" placeholder="Dejar vacío para usar el global" />
         </div>
       </div>
 
-      <div class="form-section-title">Spotify Artist ID</div>
-      <div class="form-group">
-        <label>ID del artista en Spotify</label>
-        <input type="text" id="sp-artist-id" value="${c.spotifyArtistId || ''}"
-          placeholder="Ej: 3TVXtAsR1Inumwj472S9r4" />
-        <span class="form-hint">Encuéntralo en la URL del perfil del artista en Spotify</span>
-      </div>
-
-      ${c.connected
-        ? `<div class="alert alert-success" style="margin-top:12px;">✓ Cuenta conectada como: ${c.displayName || c.spotifyUserId || 'Usuario'}</div>`
-        : ''}
+      <!-- OAuth (optional extra) -->
+      <div class="form-section-title">OAuth de usuario (opcional)</div>
+      <p style="font-size:0.82rem; color:var(--text2); margin-bottom:10px;">
+        Solo necesario para datos privados del usuario (recently played).
+        No es requerido para métricas del artista.
+      </p>
+      ${c.connected && c.accessToken === '[stored]'
+        ? `<div class="alert alert-success">✓ OAuth conectado como: ${c.displayName || c.spotifyUserId || 'Usuario'}</div>`
+        : `<button class="btn btn-secondary btn-sm" onclick="saveSpotifyConfig('${id}', true)">🔗 Conectar con OAuth</button>`
+      }
     </div>
     <div class="modal-footer">
       ${c.connected
         ? `<button class="btn btn-danger btn-sm" onclick="disconnectPlatform('${id}', 'spotify')">Desconectar</button>`
         : ''}
       <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
-      <button class="btn btn-secondary" onclick="saveSpotifyConfig('${id}')">Guardar config</button>
-      <button class="btn btn-primary" onclick="connectSpotify('${id}')">🔗 Conectar con OAuth</button>
+      <button class="btn btn-primary" onclick="saveSpotifyConfig('${id}')">💾 Guardar y Conectar</button>
     </div>
   `);
 }
 
-async function saveSpotifyConfig(id) {
-  const clientId = document.getElementById('sp-client-id')?.value.trim();
-  const clientSecret = document.getElementById('sp-client-secret')?.value.trim();
-  const spotifyArtistId = document.getElementById('sp-artist-id')?.value.trim();
+async function verifySpotifyArtist() {
+  const artistId = document.getElementById('sp-artist-id')?.value.trim();
+  if (!artistId) { toast('Ingresa un Artist ID primero', 'error'); return; }
+
+  const preview = document.getElementById('sp-artist-preview');
+  preview.innerHTML = '<span style="color:var(--text2); font-size:0.85rem;">Verificando...</span>';
+
+  try {
+    const data = await GET(`/spotify/artist-public/${artistId}`);
+    preview.innerHTML = `
+      <div style="display:flex; align-items:center; gap:12px; padding:12px; background:var(--bg2); border:1px solid var(--border); border-radius:8px;">
+        ${data.image ? `<img src="${data.image}" style="width:48px;height:48px;border-radius:50%;object-fit:cover;" />` : '<div style="width:48px;height:48px;border-radius:50%;background:var(--grad);"></div>'}
+        <div>
+          <div style="font-weight:700;">${data.name}</div>
+          <div style="font-size:0.8rem;color:var(--text2);">
+            ${(data.followers || 0).toLocaleString('es-ES')} seguidores
+            · Popularidad: ${data.popularity}/100
+            ${data.genres?.length ? `· ${data.genres.slice(0,2).join(', ')}` : ''}
+          </div>
+        </div>
+        <span style="margin-left:auto; color:var(--green); font-weight:700;">✓</span>
+      </div>
+    `;
+  } catch (e) {
+    preview.innerHTML = `<div class="alert alert-danger">✕ ID inválido o error: ${e.message}</div>`;
+  }
+}
+
+async function saveSpotifyConfig(id, redirectOAuth = false) {
+  const artistId      = document.getElementById('sp-artist-id')?.value.trim();
+  const clientId      = document.getElementById('sp-client-id')?.value.trim();
+  const clientSecret  = document.getElementById('sp-client-secret')?.value.trim();
+
+  if (!artistId && !clientId) {
+    toast('Ingresa al menos el Spotify Artist ID', 'error');
+    return;
+  }
 
   try {
     await POST(`/spotify/config/${id}`, {
-      ...(clientId && { clientId }),
-      ...(clientSecret && { clientSecret }),
-      ...(spotifyArtistId !== undefined && { spotifyArtistId })
+      ...(artistId     && { spotifyArtistId: artistId }),
+      ...(clientId     && { clientId }),
+      ...(clientSecret && { clientSecret })
     });
     toast('Configuración de Spotify guardada', 'success');
+
+    if (redirectOAuth) {
+      await connectSpotify(id);
+      return;
+    }
+
     closeModal();
-    await loadArtist(id);
-    renderDetail(state.artist);
+    const updated = await loadArtist(id);
+    renderDetail(updated);
   } catch (e) {
     toast('Error: ' + e.message, 'error');
   }
