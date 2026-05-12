@@ -28,6 +28,37 @@ app.use('/api/spotify', require('./api/spotify'));
 app.use('/api/youtube', require('./api/youtube'));
 app.use('/api/instagram', require('./api/instagram'));
 
+// Temporary diagnostic endpoint — shows what's stored without exposing tokens
+app.get('/api/debug/artist/:id', async (req, res) => {
+  const { getArtist, USE_REDIS } = require('./lib/storage');
+  try {
+    const artist = await getArtist(req.params.id);
+    if (!artist) return res.json({ found: false, storage: USE_REDIS ? 'redis' : 'files' });
+
+    const sp = artist.credentials?.spotify || {};
+    res.json({
+      found:          true,
+      storage:        USE_REDIS ? 'redis' : 'files',
+      artistName:     artist.name,
+      spotify: {
+        connected:       sp.connected,
+        spotifyArtistId: sp.spotifyArtistId || null,
+        hasAccessToken:  !!sp.accessToken,
+        hasRefreshToken: !!sp.refreshToken,
+        hasClientId:     !!sp.clientId,
+        spotifyUserId:   sp.spotifyUserId || null
+      },
+      envVars: {
+        SPOTIFY_CLIENT_ID:     !!process.env.SPOTIFY_CLIENT_ID,
+        SPOTIFY_CLIENT_SECRET: !!process.env.SPOTIFY_CLIENT_SECRET,
+        UPSTASH_REDIS_REST_URL: !!process.env.UPSTASH_REDIS_REST_URL
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
