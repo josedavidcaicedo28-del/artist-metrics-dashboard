@@ -288,14 +288,17 @@ function spotifySection(artist, curr = {}, prev = {}) {
           </tr>
         </thead>
         <tbody>
-          ${metricRow('Oyentes semanales', prev.listeners, curr.listeners)}
-          ${metricRow('Streams último lanzamiento', prev.streams, curr.streams)}
-          ${metricRow('Prom. diario de streams', prev.avgDailyStreams, curr.avgDailyStreams)}
           ${metricRow('Seguidores totales', prev.totalFollowers, curr.totalFollowers)}
-          ${metricRow('Nuevos seguidores', prev.newFollowers, curr.newFollowers)}
+          ${metricRow('Nuevos seguidores', prev.newFollowers, curr.newFollowers, true)}
+          ${metricRowAuto('Oyentes semanales', prev.listeners, curr.listeners)}
+          ${metricRowAuto('Streams último lanzamiento', prev.streams, curr.streams)}
+          ${metricRowAuto('Prom. diario de streams', prev.avgDailyStreams, curr.avgDailyStreams)}
         </tbody>
       </table>
       ${curr.latestReleaseName ? `<div style="padding:10px 20px; font-size:0.8rem; color:var(--text3)">Último lanzamiento: ${curr.latestReleaseName}</div>` : ''}
+      <div style="padding:8px 20px 12px; font-size:0.75rem; color:var(--text3); border-top:1px solid var(--border); margin-top:4px;">
+        ✦ Seguidores: automático via API &nbsp;·&nbsp; ✎ Oyentes / Streams: ingresar desde <strong>Spotify for Artists</strong>
+      </div>
     </div>
   `;
 }
@@ -394,6 +397,22 @@ function tiktokSection(artist, curr = {}, prev = {}) {
       </table>
     </div>
   `;
+}
+
+// Row for a metric that requires manual entry (shows pencil icon when empty)
+function metricRowAuto(label, prevVal, currVal) {
+  const empty = (!prevVal || prevVal === 0) && (!currVal || currVal === 0);
+  if (empty) {
+    return `
+      <tr>
+        <td>${label} <span style="color:var(--text3); font-size:0.7rem;">✎ manual</span></td>
+        <td class="metric-prev" colspan="3" style="color:var(--text3); font-style:italic; text-align:center; font-size:0.8rem;">
+          Ingresa desde Spotify for Artists → ✏️ Editar
+        </td>
+      </tr>
+    `;
+  }
+  return metricRow(label, prevVal, currVal);
 }
 
 function metricRow(label, prevVal, currVal, allowNeg = false) {
@@ -908,22 +927,49 @@ async function syncSpotify(id) {
   toast('Sincronizando Spotify...', 'info', 2000);
   try {
     const metrics = await GET(`/spotify/metrics/${id}`);
-    toast(`Spotify sincronizado. Seguidores: ${fmt(metrics.totalFollowers)}`, 'success');
-    // Pre-fill current week
-    const artist = await loadArtist(id);
-    const weeklyData = {
-      currWeek: {
-        ...artist.weeklyData?.currWeek,
-        spotify: {
-          ...artist.weeklyData?.currWeek?.spotify,
-          totalFollowers: metrics.totalFollowers || 0
-        }
-      }
+    const artist  = await loadArtist(id);
+    const prev    = artist.weeklyData?.prevWeek?.spotify || {};
+    const curr    = artist.weeklyData?.currWeek?.spotify || {};
+
+    // Auto-calculate new followers: if prevWeek has data, diff against that;
+    // otherwise use the delta returned by the server
+    const autoNewFollowers = prev.totalFollowers > 0
+      ? metrics.totalFollowers - prev.totalFollowers
+      : (metrics.newFollowers || 0);
+
+    // Fields the API gives us — write them directly into currWeek
+    const spotifyAuto = {
+      ...curr,
+      totalFollowers:  metrics.totalFollowers || 0,
+      newFollowers:    autoNewFollowers,
+      // avgDailyStreams proxy: popularity is 0-100; scale to something visible
+      // Real streams and listeners must come from Spotify for Artists
     };
-    await PUT(`/artists/${id}`, { weeklyData });
+
+    // Update artist image if we got one and none is saved yet
+    const patch = { weeklyData: { prevWeek: artist.weeklyData?.prevWeek, currWeek: { ...artist.weeklyData?.currWeek, spotify: spotifyAuto } } };
+    if (metrics.image && !artist.image) patch.image = metrics.image;
+
+    await PUT(`/artists/${id}`, patch);
     const updated = await loadArtist(id);
     renderDetail(updated);
-    if (metrics.note) toast(metrics.note, 'info', 6000);
+
+    // Show what was synced
+    const lines = [
+      `✓ Seguidores: ${fmt(metrics.totalFollowers)}`,
+      metrics.newFollowers !== 0 ? `  Nuevos: ${autoNewFollowers >= 0 ? '+' : ''}${fmt(autoNewFollowers)}` : null,
+      `✓ Popularidad: ${metrics.popularity}/100`,
+      metrics.topTracks?.length ? `✓ Top track: "${metrics.topTracks[0].name}"` : null
+    ].filter(Boolean).join('\n');
+
+    toast(lines, 'success', 5000);
+
+    // If manual fields are still at 0, open the edit form so the user can fill them in
+    if (!spotifyAuto.listeners && !spotifyAuto.streams) {
+      setTimeout(() => {
+        toast('Completa oyentes y streams desde Spotify for Artists → ✏️ Editar', 'info', 6000);
+      }, 1000);
+    }
   } catch (e) {
     toast('Error sincronizando Spotify: ' + e.message, 'error');
   }

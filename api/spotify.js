@@ -182,7 +182,7 @@ router.get('/metrics/:artistId', async (req, res) => {
 
     let artistData = null, topTracks = [], recentPlayCount = 0;
 
-    // Path A: Client Credentials — public artist data (preferred)
+    // Path A: Client Credentials — public artist data (preferred, no user auth needed)
     if (spotifyArtistId) {
       const ccToken = await getClientCredentialsToken(clientId, clientSecret);
       const headers = { Authorization: `Bearer ${ccToken}` };
@@ -192,11 +192,24 @@ router.get('/metrics/:artistId', async (req, res) => {
         axios.get(`${API_URL}/artists/${spotifyArtistId}/top-tracks?market=ES`, { headers })
       ]);
 
-      if (artistRes.status === 'fulfilled') artistData = artistRes.value.data;
-      if (topRes.status === 'fulfilled')    topTracks  = topRes.value.data.tracks || [];
+      // Surface the real Spotify error instead of silently returning 0
+      if (artistRes.status === 'rejected') {
+        const spotifyErr = artistRes.reason?.response?.data?.error?.message
+                        || artistRes.reason?.message
+                        || 'Error consultando Spotify';
+        const statusCode = artistRes.reason?.response?.status || 500;
+        return res.status(statusCode).json({
+          error: `Spotify: ${spotifyErr}`,
+          spotifyArtistId,
+          hint: 'Verifica que el Spotify Artist ID sea correcto (ej: 36pU0SBDFZq23Ca4qq40jg)'
+        });
+      }
+
+      artistData = artistRes.value.data;
+      if (topRes.status === 'fulfilled') topTracks = topRes.value.data.tracks || [];
     }
 
-    // Path B: OAuth — adds recently-played count
+    // Path B: OAuth user token — adds recently-played count
     if (hasOAuth) {
       try {
         const oauthToken = await getRefreshedToken(artist);
@@ -206,6 +219,7 @@ router.get('/metrics/:artistId', async (req, res) => {
         );
         recentPlayCount = recentRes.data.items?.length || 0;
 
+        // If no Artist ID was configured, fall back to user profile for basic data
         if (!artistData) {
           const profileRes = await axios.get(`${API_URL}/me`,
             { headers: { Authorization: `Bearer ${oauthToken}` } });
@@ -216,22 +230,36 @@ router.get('/metrics/:artistId', async (req, res) => {
           };
         }
       } catch (oauthErr) {
-        console.warn('OAuth refresh failed, using Client Credentials only:', oauthErr.message);
+        console.warn('OAuth refresh failed, CC data will be used:', oauthErr.message);
       }
     }
 
+    const totalFollowers = artistData?.followers?.total ?? 0;
+
+    // Calculate new followers vs what's stored in prevWeek
+    const prevFollowers  = artist.weeklyData?.prevWeek?.spotify?.totalFollowers ?? 0;
+    const currFollowers  = artist.weeklyData?.currWeek?.spotify?.totalFollowers ?? 0;
+    // newFollowers = difference since we first started tracking this week
+    const newFollowers   = currFollowers > 0
+      ? totalFollowers - currFollowers   // incremental since last sync
+      : totalFollowers - prevFollowers;  // full week diff on first sync
+
     res.json({
-      totalFollowers:  artistData?.followers?.total ?? 0,
-      displayName:     artistData?.name ?? '',
-      image:           artistData?.images?.[0]?.url ?? null,
-      popularity:      artistData?.popularity ?? 0,
+      // What we got from the API (always accurate)
+      totalFollowers,
+      newFollowers:      Math.max(0, newFollowers),  // can go negative → user sees it via edit
+      displayName:       artistData?.name ?? '',
+      image:             artistData?.images?.[0]?.url ?? null,
+      popularity:        artistData?.popularity ?? 0,
+      genres:            artistData?.genres ?? [],
       topTracks: topTracks.slice(0, 5).map(t => ({
         name: t.name, id: t.id, popularity: t.popularity, previewUrl: t.preview_url || null
       })),
       recentPlayCount,
-      fetchedAt:  new Date().toISOString(),
-      authMethod: spotifyArtistId ? 'client_credentials' : 'oauth',
-      note: 'Oyentes semanales y streams exactos solo están en Spotify for Artists. Usa ✏️ Editar para ingresarlos.'
+      fetchedAt:         new Date().toISOString(),
+      // What requires manual entry (not available in public API)
+      manualRequired:    ['listeners', 'streams'],
+      manualNote:        'Oyentes semanales y streams no están en la API pública de Spotify. Se obtienen solo desde Spotify for Artists.'
     });
   } catch (err) {
     console.error('Spotify metrics error:', err.response?.data || err.message);
