@@ -13,7 +13,7 @@ const SCOPES = [
   'user-read-recently-played'
 ].join(' ');
 
-const PROD_URL = 'https://artist-metrics-dashboard.vercel.app';
+const PROD_URL = 'https://artist-metrics-dashboard-p55ut4vex.vercel.app';
 
 function getRedirectUri() {
   return process.env.SPOTIFY_REDIRECT_URI ||

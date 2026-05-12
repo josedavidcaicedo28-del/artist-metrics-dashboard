@@ -7,7 +7,7 @@ const IG_AUTH       = 'https://api.instagram.com/oauth/authorize';
 const IG_TOKEN      = 'https://api.instagram.com/oauth/access_token';
 const IG_LONG_TOKEN = 'https://graph.instagram.com/access_token';
 const IG_GRAPH      = 'https://graph.instagram.com';
-const PROD_URL      = 'https://artist-metrics-dashboard.vercel.app';
+const PROD_URL      = 'https://artist-metrics-dashboard-p55ut4vex.vercel.app';
 
 function getRedirectUri() {
   return process.env.INSTAGRAM_REDIRECT_URI ||
